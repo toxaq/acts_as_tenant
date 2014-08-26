@@ -2,7 +2,7 @@
 
 
 module ActsAsTenant
-  
+
   class << self
     cattr_accessor :tenant_class
 
@@ -26,75 +26,81 @@ module ActsAsTenant
       self.current_tenant = tenant
 
       value = block.call
-
-      self.current_tenant= old_tenant
       return value
+
+    ensure
+      self.current_tenant = old_tenant
     end
   end
-  
+
   module ModelExtensions
     extend ActiveSupport::Concern
-  
+
     # Alias the v_uniqueness_of method so we can scope it to the current tenant when relevant
-  
+
     module ClassMethods
-    
-      def acts_as_tenant(association = :account)
-        
+
+      def acts_as_tenant(association = :account, options = {})
+
         # Method that enables checking if a class is scoped by tenant
         def self.is_scoped_by_tenant?
           true
         end
-        
+
         ActsAsTenant.tenant_class ||= association
-        
+
         # Setup the association between the class and the tenant class
         belongs_to association
-      
+
         # get the tenant model and its foreign key
         reflection = reflect_on_association association
-        
-        # As the "foreign_key" method changed name in 3.1 we check for backward compatibility 
+
+        # As the "foreign_key" method changed name in 3.1 we check for backward compatibility
         if reflection.respond_to?(:foreign_key)
           fkey = reflection.foreign_key
         else
           fkey = reflection.association_foreign_key
         end
-    
+
         # set the current_tenant on newly created objects
         before_validation Proc.new {|m|
           return unless ActsAsTenant.current_tenant
           m.send "#{association}_id=".to_sym, ActsAsTenant.current_tenant.id
         }, :on => :create
-    
+
         # set the default_scope to scope to current tenant
+        include_nulls = options[:include_nulls].nil? ? false : !!options[:include_nulls]
         default_scope lambda {
-          where({fkey => ActsAsTenant.current_tenant.id}) if ActsAsTenant.current_tenant
+          if ActsAsTenant.current_tenant
+            ids = [ActsAsTenant.current_tenant.id]
+            ids << nil if include_nulls
+            where({"#{self.table_name}.#{fkey}" => ids})
+          end
         }
-    
+
         # Rewrite accessors to make tenant foreign_key/association immutable
-        define_method "#{fkey}=" do |integer|  
+        define_method "#{fkey}=" do |integer|
           if new_record?
-            write_attribute(fkey, integer)  
+            write_attribute(fkey, integer)
           else
             raise "#{fkey} is immutable! [ActsAsTenant]"
-          end  
+          end
         end
-      
-        define_method "#{association}=" do |model|  
+
+        define_method "#{association}=" do |model|
           if new_record?
-            super(model) 
+            super(model)
           else
             raise "#{association} is immutable! [ActsAsTenant]"
-          end  
+          end
         end
-      
+
         # add validation of associations against tenant scope
-        # we can't do this for polymorphic associations so we 
+        # we can't do this for polymorphic associations so we
         # exempt them
         reflect_on_all_associations.each do |a|
           unless a == reflection || a.macro == :has_many || a.macro == :has_one || a.macro == :has_and_belongs_to_many || a.options[:polymorphic]
-            # check if the association is aliasing another class, if so 
+            # check if the association is aliasing another class, if so
             # find the unaliased class name
             association_class =  a.options[:class_name].nil? ? a.name.to_s.classify.constantize : a.options[:class_name].constantize
             validates_each a.foreign_key.to_sym do |record, attr, value|
@@ -103,16 +109,16 @@ module ActsAsTenant
               record.errors.add attr, "is invalid [ActsAsTenant]" unless value.nil? || association_class.where(:id => value).present?
             end
           end
-        end 
+        end
       end
-      
+
       def validates_uniqueness_to_tenant(fields, args ={})
         raise "[ActsAsTenant] validates_uniqueness_to_tenant: no current tenant" unless respond_to?(:is_scoped_by_tenant?)
         tenant_id = lambda { "#{ActsAsTenant.tenant_class.to_s.downcase}_id"}.call
         args[:scope].nil? ? args[:scope] = tenant_id : args[:scope] << tenant_id
         validates_uniqueness_of(fields, args)
       end
-      
+
     end
   end
 end
